@@ -32,8 +32,8 @@ function formatCount(n: number): string {
 }
 function mapPlatform(source: string): string {
   const map: Record<string, string> = {
-    tiktok:"tiktok",youtube:"youtube",instagram:"instagram",
-    twitter:"twitter",facebook:"facebook",vimeo:"vimeo",x:"twitter",
+    tiktok:"tiktok", youtube:"youtube", instagram:"instagram",
+    twitter:"twitter", facebook:"facebook", vimeo:"vimeo", x:"twitter",
   };
   return map[source?.toLowerCase()] ?? source?.toLowerCase() ?? "unknown";
 }
@@ -46,6 +46,48 @@ function pickBest(medias: RapidAPIMedia[]): RapidAPIMedia | null {
   return medias.find((x) => x.type === "video" && x.url) ?? medias.find((x) => x.url) ?? null;
 }
 
+// ── GET /api/download?proxyUrl=... ─────────────────────────────────────────
+// Proxies the actual file download through the server to bypass CORS
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const proxyUrl  = searchParams.get("proxyUrl");
+  const filename  = searchParams.get("filename") ?? "nexload-video.mp4";
+
+  if (!proxyUrl) {
+    return NextResponse.json({ error: "Missing proxyUrl parameter." }, { status: 400 });
+  }
+
+  try {
+    const response = await fetch(decodeURIComponent(proxyUrl), {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.tiktok.com/",
+      },
+    });
+
+    if (!response.ok) {
+      return NextResponse.json({ error: `Upstream fetch failed (${response.status})` }, { status: 502 });
+    }
+
+    const contentType   = response.headers.get("content-type")  ?? "video/mp4";
+    const contentLength = response.headers.get("content-length") ?? "";
+
+    const headers = new Headers({
+      "Content-Type":        contentType,
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Cache-Control":       "no-cache",
+    });
+    if (contentLength) headers.set("Content-Length", contentLength);
+
+    return new NextResponse(response.body, { status: 200, headers });
+
+  } catch (err) {
+    console.error("Proxy error:", err);
+    return NextResponse.json({ error: "Failed to proxy download." }, { status: 502 });
+  }
+}
+
+// ── POST /api/download ─────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
     let body: { url?: string };
@@ -127,7 +169,4 @@ export async function POST(req: NextRequest) {
     console.error("Unexpected error:", err);
     return NextResponse.json({ error: "Unexpected server error." }, { status: 500 });
   }
-}
-export async function GET() {
-  return NextResponse.json({ error: "Use POST." }, { status: 405 });
 }
