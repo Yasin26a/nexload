@@ -12,7 +12,7 @@ const PLATFORMS = [
   { id: "vimeo",     icon: "◈", accent: "#1AB7EA", tag: "VIMEO" },
 ];
 
-type Status = "idle" | "fetching" | "ready" | "downloading" | "complete" | "error";
+type Status = "idle" | "fetching" | "ready" | "complete" | "error";
 
 interface MediaOption {
   url: string; quality: string; extension: string;
@@ -53,14 +53,19 @@ function formatBytes(bytes: number): string {
   return (bytes / 1_000).toFixed(0) + " KB";
 }
 
+function isMobile(): boolean {
+  return /Android|iPhone|iPad|iPod|Opera Mini|IEMobile|Mobile/i.test(
+    typeof navigator !== "undefined" ? navigator.userAgent : ""
+  );
+}
+
 function StatusDot({ status }: { status: Status }) {
   const map: Record<Status, { color: string; label: string; blink: boolean }> = {
-    idle:        { color: "bg-slate-600", label: "STANDBY",     blink: false },
-    fetching:    { color: "bg-cyan-400",  label: "SCANNING",    blink: true  },
-    ready:       { color: "bg-green-400", label: "READY",       blink: false },
-    downloading: { color: "bg-cyan-400",  label: "DOWNLOADING", blink: true  },
-    complete:    { color: "bg-green-400", label: "COMPLETE",    blink: false },
-    error:       { color: "bg-red-500",   label: "ERROR",       blink: false },
+    idle:     { color: "bg-slate-600", label: "STANDBY",  blink: false },
+    fetching: { color: "bg-cyan-400",  label: "SCANNING", blink: true  },
+    ready:    { color: "bg-green-400", label: "READY",    blink: false },
+    complete: { color: "bg-green-400", label: "COMPLETE", blink: false },
+    error:    { color: "bg-red-500",   label: "ERROR",    blink: false },
   };
   const s = map[status];
   return (
@@ -74,11 +79,12 @@ function StatusDot({ status }: { status: Status }) {
 export default function DownloaderForm() {
   const [url,            setUrl]           = useState("");
   const [status,         setStatus]        = useState<Status>("idle");
-  const [progress,       setProgress]      = useState(0);
   const [activePlatform, setActivePlatform]= useState<string | null>(null);
   const [downloadInfo,   setDownloadInfo]  = useState<DownloadInfo | null>(null);
   const [selectedMedia,  setSelectedMedia] = useState<MediaOption | null>(null);
   const [error,          setError]         = useState("");
+  // Mobile hint: shown after download triggered on mobile
+  const [mobileHint,     setMobileHint]    = useState(false);
 
   const containerVariants = {
     hidden:  {},
@@ -96,6 +102,7 @@ export default function DownloaderForm() {
     setError("");
     setDownloadInfo(null);
     setSelectedMedia(null);
+    setMobileHint(false);
     if (status !== "idle") setStatus("idle");
   };
 
@@ -106,6 +113,7 @@ export default function DownloaderForm() {
     setError("");
     setDownloadInfo(null);
     setSelectedMedia(null);
+    setMobileHint(false);
     try {
       const res  = await fetch("/api/download", {
         method: "POST",
@@ -127,73 +135,57 @@ export default function DownloaderForm() {
     }
   };
 
-  const handleDownload = async () => {
+  // ── handleDownload — CORS-safe, no blob fetch ────────────────────────────
+  const handleDownload = () => {
     const target = selectedMedia ?? (downloadInfo
       ? { url: downloadInfo.downloadUrl, extension: downloadInfo.extension,
           quality: downloadInfo.quality, type: "video" as const, size: 0, width: 0, height: 0 }
       : null);
+
     if (!target || status !== "ready") return;
-    setStatus("downloading");
-    setProgress(0);
-    try {
-      const response = await fetch(target.url);
-      if (!response.ok) throw new Error(`Fetch failed (${response.status})`);
-      const contentLength = response.headers.get("Content-Length");
-      const total = contentLength ? parseInt(contentLength, 10) : 0;
-      let loaded = 0;
-      const chunks: Blob[] = [];
-      const reader = response.body?.getReader();
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            chunks.push(new Blob([value]));
-            loaded += value.length;
-            if (total > 0) setProgress(Math.min(Math.round((loaded / total) * 100), 99));
-            else setProgress((p) => Math.min(p + 2, 90));
-          }
-        }
-      } else {
-        const blob = await response.blob();
-        chunks.push(blob);
-      }
-      setProgress(100);
-      const blob    = new Blob(chunks);
-      const blobUrl = URL.createObjectURL(blob);
-      const title   = downloadInfo?.title ?? "nexload";
-      const fname   = `${title.replace(/[^a-z0-9\s]/gi,"").replace(/\s+/g,"_").substring(0,60)}.${target.extension}`;
-      const a = document.createElement("a");
-      a.href = blobUrl; a.download = fname; a.style.display = "none";
-      document.body.appendChild(a); a.click(); document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 10_000);
+
+    const mobile = isMobile();
+
+    // Build a clean filename
+    const title    = downloadInfo?.title ?? "nexload";
+    const safeName = title.replace(/[^a-z0-9\s]/gi, "").replace(/\s+/g, "_").substring(0, 60);
+    const filename = `${safeName}.${target.extension}`;
+
+    if (mobile) {
+      // On mobile: open in new tab so user can long-press → Save Video
+      window.open(target.url, "_blank", "noopener,noreferrer");
+      setMobileHint(true);
       setStatus("complete");
-    } catch (err: unknown) {
-      setError(`DOWNLOAD ERR :: ${err instanceof Error ? err.message : "Failed"}`);
-      setStatus("error");
+    } else {
+      // On desktop: try anchor download first
+      // For cross-origin URLs the `download` attr is ignored by browsers,
+      // so we also open in a new tab as the reliable fallback
+      const a = document.createElement("a");
+      a.href            = target.url;
+      a.download        = filename;
+      a.target          = "_blank";
+      a.rel             = "noopener noreferrer";
+      a.style.display   = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setStatus("complete");
     }
   };
 
-  const isLoading   = status === "fetching" || status === "downloading";
   const canDownload = status === "ready";
 
   return (
     <div className="relative z-10 w-full max-w-5xl mx-auto px-6 py-12 space-y-10">
 
-      {/* ── HEADER ──────────────────────────────────────────────────────── */}
+      {/* Header */}
       <motion.div initial={{ opacity:0, y:-40 }} animate={{ opacity:1, y:0 }}
         transition={{ duration:0.8, ease:[0.16,1,0.3,1] }} className="text-center space-y-4">
-
-        {/* Big glitch title */}
         <h1 className="logo-glitch font-display font-black text-7xl sm:text-8xl md:text-9xl tracking-tighter text-white text-glow-cyan uppercase"
           data-text="NEXLOAD">NEXLOAD</h1>
-
-        {/* Subtitle */}
         <p className="font-mono text-base sm:text-lg font-bold text-cyan-400 tracking-[0.4em] uppercase">
           ⬡ Cybernetic Video Downloader ⬡
         </p>
-
-        {/* Divider line */}
         <div className="flex items-center justify-center gap-4 pt-2">
           <div className="h-px w-24 bg-gradient-to-r from-transparent to-cyan-500" />
           <span className="font-mono text-xs text-slate-600 tracking-widest">ALL PLATFORMS SUPPORTED</span>
@@ -201,18 +193,15 @@ export default function DownloaderForm() {
         </div>
       </motion.div>
 
-      {/* ── PLATFORM GRID ───────────────────────────────────────────────── */}
+      {/* Platform grid */}
       <motion.div variants={containerVariants} initial="hidden" animate="visible"
         className="grid grid-cols-3 sm:grid-cols-6 gap-3">
         {PLATFORMS.map((p) => (
           <motion.div key={p.id} variants={cardVariants}
             onClick={() => setActivePlatform(activePlatform === p.id ? null : p.id)}
             className={`platform-card bracket-border glass cursor-pointer border-2 rounded-sm p-4 text-center select-none transition-all duration-200
-              ${activePlatform === p.id
-                ? "border-cyan-500 border-glow-cyan"
-                : "border-slate-700 hover:border-cyan-500/60"}`}>
-            <div className="text-2xl mb-2 transition-all duration-200"
-              style={{ color: activePlatform === p.id ? p.accent : "#64748b" }}>{p.icon}</div>
+              ${activePlatform === p.id ? "border-cyan-500 border-glow-cyan" : "border-slate-700 hover:border-cyan-500/60"}`}>
+            <div className="text-2xl mb-2" style={{ color: activePlatform === p.id ? p.accent : "#64748b" }}>{p.icon}</div>
             <div className="font-mono text-[10px] font-bold tracking-widest"
               style={{ color: activePlatform === p.id ? p.accent : "#475569" }}>{p.tag}</div>
             <AnimatePresence>
@@ -225,30 +214,27 @@ export default function DownloaderForm() {
         ))}
       </motion.div>
 
-      {/* ── URL INPUT ───────────────────────────────────────────────────── */}
+      {/* URL Input */}
       <motion.div initial={{ opacity:0, y:24 }} animate={{ opacity:1, y:0 }}
-        transition={{ delay:0.4, duration:0.7, ease:[0.16,1,0.3,1] }}
+        transition={{ delay:0.4, duration:0.7 }}
         className="glass bracket-border border-2 border-cyan-500/30 rounded-sm p-8 space-y-6">
-
         <div className="space-y-3">
           <label className="font-mono text-sm font-black text-cyan-400 tracking-[0.3em] uppercase flex items-center gap-2">
-            <span className="text-cyan-500">◈</span> PASTE YOUR VIDEO LINK
+            <span>◈</span> PASTE YOUR VIDEO LINK
           </label>
           <div className="flex gap-3">
             <input type="url" value={url} onChange={(e) => handleUrlChange(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !isLoading && handleAnalyze()}
+              onKeyDown={(e) => e.key === "Enter" && status !== "fetching" && handleAnalyze()}
               placeholder="https://www.tiktok.com/@user/video/..."
               className="cyber-input font-mono text-base font-bold w-full glass border-2 border-cyan-500/25 rounded-sm px-5 py-4 text-white placeholder:text-slate-700 bg-transparent transition-all duration-300" />
-            <motion.button onClick={handleAnalyze} disabled={isLoading || !url.trim()} whileTap={{ scale:0.96 }}
+            <motion.button onClick={handleAnalyze} disabled={status === "fetching" || !url.trim()} whileTap={{ scale:0.96 }}
               className={`font-mono text-sm font-black tracking-[0.2em] px-8 py-4 rounded-sm border-2 transition-all duration-200 whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed uppercase
-                ${isLoading
-                  ? "bg-cyan-500/20 border-cyan-500 text-cyan-300"
-                  : "bg-cyan-500/10 border-cyan-500/60 text-cyan-400 hover:bg-cyan-500/30 hover:border-cyan-400 hover:text-white hover:shadow-[0_0_20px_rgba(6,182,212,0.4)]"}`}>
+                ${status === "fetching" ? "bg-cyan-500/20 border-cyan-500 text-cyan-300"
+                  : "bg-cyan-500/10 border-cyan-500/60 text-cyan-400 hover:bg-cyan-500/30 hover:border-cyan-400 hover:text-white"}`}>
               {status === "fetching" ? "SCANNING..." : "ANALYZE"}
             </motion.button>
           </div>
         </div>
-
         <div className="flex items-center justify-between pt-1 border-t border-slate-800">
           <StatusDot status={status} />
           <span className="font-mono text-sm font-bold text-slate-500 tracking-[0.2em]">
@@ -257,7 +243,7 @@ export default function DownloaderForm() {
         </div>
       </motion.div>
 
-      {/* ── ERROR ───────────────────────────────────────────────────────── */}
+      {/* Error */}
       <AnimatePresence>
         {error && (
           <motion.div initial={{ opacity:0, height:0 }} animate={{ opacity:1, height:"auto" }}
@@ -268,20 +254,19 @@ export default function DownloaderForm() {
         )}
       </AnimatePresence>
 
-      {/* ── RESULT CARD ─────────────────────────────────────────────────── */}
+      {/* Result card */}
       <AnimatePresence>
         {downloadInfo && (
           <motion.div initial={{ opacity:0, y:20, scale:0.98 }} animate={{ opacity:1, y:0, scale:1 }}
             exit={{ opacity:0, y:-10 }} transition={{ type:"spring", stiffness:180, damping:20 }}
             className="glass bracket-border border-2 border-cyan-500/30 rounded-sm overflow-hidden">
 
-            {/* Thumbnail + info */}
+            {/* Thumbnail + meta */}
             <div className="sm:flex">
               <div className="sm:w-72 flex-shrink-0 relative bg-slate-900">
                 {downloadInfo.thumbnail
                   ? <img src={downloadInfo.thumbnail} alt="thumb" className="w-full h-48 sm:h-full object-cover opacity-90" />
-                  : <div className="w-full h-48 flex items-center justify-center text-slate-700 font-mono font-bold text-sm">NO PREVIEW</div>
-                }
+                  : <div className="w-full h-48 flex items-center justify-center text-slate-700 font-mono font-bold text-sm">NO PREVIEW</div>}
                 <div className="absolute inset-0 bg-gradient-to-r from-transparent to-[#050505]/80" />
                 <div className="absolute bottom-3 right-3 font-mono text-sm font-black bg-black/90 border-2 border-cyan-500/50 px-3 py-1 text-cyan-400 tracking-widest">
                   {downloadInfo.duration}
@@ -289,17 +274,9 @@ export default function DownloaderForm() {
               </div>
               <div className="flex-1 p-6 space-y-5">
                 <div>
-                  {downloadInfo.author && (
-                    <p className="font-mono text-sm font-bold text-cyan-500/80 tracking-widest mb-2">
-                      @{downloadInfo.author}
-                    </p>
-                  )}
-                  <p className="font-display font-black text-white text-lg leading-snug line-clamp-2">
-                    {downloadInfo.title}
-                  </p>
+                  {downloadInfo.author && <p className="font-mono text-sm font-bold text-cyan-500/80 tracking-widest mb-2">@{downloadInfo.author}</p>}
+                  <p className="font-display font-black text-white text-lg leading-snug line-clamp-2">{downloadInfo.title}</p>
                 </div>
-
-                {/* Stats */}
                 {downloadInfo.stats && (
                   <div className="grid grid-cols-5 gap-2">
                     {([
@@ -317,7 +294,6 @@ export default function DownloaderForm() {
                     ))}
                   </div>
                 )}
-
                 <span className="inline-block font-mono text-xs font-black border-2 border-cyan-500/30 px-3 py-1 text-cyan-400 tracking-[0.3em] rounded-sm">
                   {downloadInfo.platform.toUpperCase()}
                 </span>
@@ -347,29 +323,22 @@ export default function DownloaderForm() {
               </div>
             )}
 
-            {/* Progress bar */}
+            {/* Mobile hint */}
             <AnimatePresence>
-              {status === "downloading" && (
+              {mobileHint && (
                 <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} exit={{ opacity:0 }}
-                  className="px-6 pb-5 pt-4 space-y-3">
-                  <div className="flex justify-between">
-                    <span className="font-mono text-sm font-black text-slate-400 tracking-widest">TRANSFER PROGRESS</span>
-                    <span className="font-mono text-sm font-black text-cyan-400">{progress}%</span>
-                  </div>
-                  <div className="w-full h-2 bg-slate-800 rounded-sm overflow-hidden">
-                    <motion.div className="h-full progress-shimmer" initial={{ width:0 }}
-                      animate={{ width:`${progress}%` }} transition={{ ease:"linear", duration:0.15 }} />
-                  </div>
+                  className="mx-6 mb-4 font-mono text-sm font-bold text-cyan-400 border-2 border-cyan-500/30 bg-cyan-500/5 rounded-sm px-5 py-3 tracking-wide">
+                  📱 Video opened in new tab — Long press the video → <strong>Save Video</strong>
                 </motion.div>
               )}
             </AnimatePresence>
 
-            {/* Complete */}
+            {/* Complete banner */}
             <AnimatePresence>
-              {status === "complete" && (
+              {status === "complete" && !mobileHint && (
                 <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }}
-                  className="mx-6 mb-5 font-mono text-sm font-black text-green-400 border-2 border-green-500/40 bg-green-500/5 rounded-sm px-5 py-3 tracking-wide">
-                  ✓ ACQUISITION COMPLETE — Check your Downloads folder.
+                  className="mx-6 mb-4 font-mono text-sm font-black text-green-400 border-2 border-green-500/40 bg-green-500/5 rounded-sm px-5 py-3 tracking-wide">
+                  ✓ DOWNLOAD INITIATED — If it didn&apos;t save automatically, right-click the video → <strong>Save Video As</strong>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -379,16 +348,12 @@ export default function DownloaderForm() {
               <motion.button onClick={handleDownload} disabled={!canDownload} whileTap={{ scale:0.98 }}
                 className={`w-full font-display font-black tracking-[0.25em] text-lg py-5 rounded-sm border-2 transition-all duration-300 uppercase
                   ${canDownload
-                    ? "bg-cyan-500/15 border-cyan-500 text-cyan-300 hover:bg-cyan-500/30 hover:text-white pulse-loading hover:shadow-[0_0_30px_rgba(6,182,212,0.4)]"
-                    : status === "downloading"
-                    ? "bg-purple-500/15 border-purple-500/60 text-purple-300 cursor-not-allowed"
+                    ? "bg-cyan-500/15 border-cyan-500 text-cyan-300 hover:bg-cyan-500/30 hover:text-white pulse-loading"
                     : status === "complete"
                     ? "bg-green-500/10 border-green-500/40 text-green-400 cursor-not-allowed"
                     : "opacity-0 pointer-events-none"}`}>
-                {status === "downloading"
-                  ? `◈ TRANSFERRING... ${progress}%`
-                  : status === "complete"
-                  ? "✓ DOWNLOAD COMPLETE"
+                {status === "complete"
+                  ? "✓ DOWNLOAD INITIATED"
                   : selectedMedia
                   ? `⬇ DOWNLOAD ${qualityLabel(selectedMedia.quality)}${selectedMedia.size ? " · " + formatBytes(selectedMedia.size) : ""}`
                   : "⬇ INITIATE DOWNLOAD"}
