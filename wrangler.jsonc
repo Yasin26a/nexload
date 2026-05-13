@@ -1,13 +1,14 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "nexload2",
+  "main": ".open-next/worker.js",
   "compatibility_date": "2026-05-13",
-  "observability": {
-    "enabled": true
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
   },
-  "compatibility_flags": [
-    "nodejs_compat"
-  ],
   "vars": {
     "RAPIDAPI_KEY": "66567b504bmshd433a026a3c2187p1d23b0jsn3e7a1c51d85e"
   }
